@@ -25,6 +25,7 @@ const GRAPH_MODE_OPTIONS: Array<{
   value: GraphMode;
   label: string;
   description: string;
+  disabled?: boolean;
 }> = [
   {
     value: "voronoi",
@@ -45,21 +46,25 @@ const GRAPH_MODE_OPTIONS: Array<{
     value: "nn-crust",
     label: "NN-crust",
     description: "Arêtes vers le plus proche voisin",
+    disabled: true,
   },
   {
     value: "gabriel",
     label: "Gabriel",
     description: "Disques de diamètre sans point intérieur",
+    disabled: true,
   },
   {
     value: "rng",
     label: "RNG",
     description: "Voisinages relatifs",
+    disabled: true,
   },
   {
     value: "mst",
     label: "ARM / MST",
     description: "Arbre de recouvrement minimal",
+    disabled: true,
   },
 ];
 
@@ -1415,21 +1420,26 @@ const VoronoiCanvas = () => {
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
               {GRAPH_MODE_OPTIONS.map((option) => {
                 const isActive = option.value === mode;
+                const isDisabled = option.disabled === true;
                 return (
                   <button
                     key={option.value}
                     type="button"
-                    onClick={() => setMode(option.value)}
+                    disabled={isDisabled}
+                    onClick={() => !isDisabled && setMode(option.value)}
                     className={`rounded-xl border px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 ${
-                      isActive
-                        ? "border-cyan-300/70 bg-cyan-300/15 text-white"
-                        : "border-white/10 bg-white/5 text-white/80 hover:border-white/30 hover:bg-white/10"
+                      isDisabled
+                        ? "cursor-not-allowed border-white/5 bg-white/[0.02] text-white/30"
+                        : isActive
+                          ? "border-cyan-300/70 bg-cyan-300/15 text-white"
+                          : "border-white/10 bg-white/5 text-white/80 hover:border-white/30 hover:bg-white/10"
                     }`}
                   >
                     <span className="block text-sm font-semibold">
                       {option.label}
+                      {isDisabled && <span className="ml-1 text-[9px] font-normal opacity-60">(bientôt)</span>}
                     </span>
-                    <span className="mt-0.5 block text-[10px] text-white/60 leading-tight">
+                    <span className={`mt-0.5 block text-[10px] leading-tight ${isDisabled ? "text-white/30" : "text-white/60"}`}>
                       {option.description}
                     </span>
                   </button>
@@ -1559,6 +1569,20 @@ export default function Home() {
         </header>
         <VoronoiCanvas />
       </section>
+      
+      <footer className="border-t border-white/10 bg-slate-950/80 py-6">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-2 px-6 text-center text-sm text-white/50 sm:flex-row sm:justify-between sm:text-left">
+          <span>De Franceschi Mohamed — Master IM</span>
+          <a
+            href="https://github.com/Moha-df/voronoi-and-stuff"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-white/50 transition hover:text-cyan-300"
+          >
+            github.com/Moha-df/voronoi-and-stuff
+          </a>
+        </div>
+      </footer>
     </main>
   );
 }

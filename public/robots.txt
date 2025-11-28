@@ -1,0 +1,6 @@
+# Robots.txt for Voronoi Atelier
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://voronoi-atelier.vercel.app/sitemap.xml

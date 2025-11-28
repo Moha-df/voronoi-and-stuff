@@ -1,0 +1,17 @@
+{
+  "name": "Voronoi Atelier - Graphes 2D Interactifs",
+  "short_name": "Voronoi Atelier",
+  "description": "Explorez les diagrammes de Voronoï, alpha-shapes, graphes de proximité et plus encore.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#04050a",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

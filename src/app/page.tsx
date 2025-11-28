@@ -73,8 +73,37 @@ const MODE_BASE_HUE: Record<GraphMode, number> = {
   mst: 175,
 };
 
-const ALPHA_RANGE = { min: 0.04, max: 0.32 };
-const ALPHA_DEFAULT = 0.18;
+// Slider goes 0-1, but maps non-linearly to radius:
+// 0.0 - 0.5  → 12 - 500 px
+// 0.5 - 0.75 → 500 - 1000 px
+// 0.75 - 1.0 → 1000 - 5000 px
+const sliderToRadius = (t: number): number => {
+  if (t <= 0.5) {
+    // First half: 12 to 500
+    const localT = t / 0.5; // 0 to 1
+    return 12 + localT * (500 - 12);
+  } else if (t <= 0.75) {
+    // Third quarter: 500 to 1000
+    const localT = (t - 0.5) / 0.25; // 0 to 1
+    return 500 + localT * (1000 - 500);
+  } else {
+    // Last quarter: 1000 to 5000
+    const localT = (t - 0.75) / 0.25; // 0 to 1
+    return 1000 + localT * (5000 - 1000);
+  }
+};
+
+const radiusToSlider = (r: number): number => {
+  if (r <= 500) {
+    return ((r - 12) / (500 - 12)) * 0.5;
+  } else if (r <= 1000) {
+    return 0.5 + ((r - 500) / (1000 - 500)) * 0.25;
+  } else {
+    return 0.75 + ((r - 1000) / (5000 - 1000)) * 0.25;
+  }
+};
+
+const ALPHA_SLIDER_DEFAULT = 0.25; // ~250px by default
 
 const INITIAL_SEEDS: Array<[number, number]> = [
   [0.18, 0.25],
@@ -94,6 +123,7 @@ const DEFAULT_HEIGHT = 600;
 const FPS = 30;
 const POINT_RADIUS = 10;
 const CELL_ROUNDING = 28;
+const CELL_GAP = 3; // Space between Voronoi cells in pixels
 
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
@@ -123,6 +153,37 @@ const polygonWithoutDuplicate = (polygon: Array<[number, number]>) => {
     return polygon.slice(0, -1);
   }
   return polygon;
+};
+
+const shrinkPolygon = (
+  polygon: Array<[number, number]>,
+  amount: number,
+): Array<[number, number]> => {
+  if (polygon.length < 3 || amount <= 0) {
+    return polygon;
+  }
+
+  // Compute centroid
+  let cx = 0;
+  let cy = 0;
+  for (const [x, y] of polygon) {
+    cx += x;
+    cy += y;
+  }
+  cx /= polygon.length;
+  cy /= polygon.length;
+
+  // Shrink each vertex towards the centroid
+  return polygon.map(([x, y]) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist === 0) {
+      return [x, y] as [number, number];
+    }
+    const shrinkDist = Math.max(0, dist - amount);
+    return [(cx + (dx / dist) * shrinkDist), (cy + (dy / dist) * shrinkDist)] as [number, number];
+  });
 };
 
 const drawRoundedPolygon = (
@@ -266,7 +327,7 @@ const computeAlphaData = (
 ) => {
   const triangles = delaunay.triangles;
   const alphaTriangles: TriangleIndex[] = [];
-  const edges = new Set<string>();
+  const edgeCount = new Map<string, number>();
 
   for (let index = 0; index < triangles.length; index += 3) {
     const i0 = triangles[index];
@@ -294,14 +355,28 @@ const computeAlphaData = (
     }
 
     alphaTriangles.push([i0, i1, i2]);
-    edges.add(edgeKey(i0, i1));
-    edges.add(edgeKey(i1, i2));
-    edges.add(edgeKey(i2, i0));
+    
+    // Count how many times each edge appears in alpha triangles
+    const e1 = edgeKey(i0, i1);
+    const e2 = edgeKey(i1, i2);
+    const e3 = edgeKey(i2, i0);
+    edgeCount.set(e1, (edgeCount.get(e1) ?? 0) + 1);
+    edgeCount.set(e2, (edgeCount.get(e2) ?? 0) + 1);
+    edgeCount.set(e3, (edgeCount.get(e3) ?? 0) + 1);
   }
+
+  // All edges of the alpha-complex
+  const allEdges = Array.from(edgeCount.keys(), decodeEdgeKey);
+  
+  // Boundary edges (alpha-shape): edges that belong to exactly ONE triangle
+  const boundaryEdges = Array.from(edgeCount.entries())
+    .filter(([, count]) => count === 1)
+    .map(([key]) => decodeEdgeKey(key));
 
   return {
     triangles: alphaTriangles,
-    edges: Array.from(edges, decodeEdgeKey),
+    allEdges,        // All edges for alpha-complex
+    boundaryEdges,   // Only boundary edges for alpha-shape
   };
 };
 
@@ -499,7 +574,8 @@ const computeDerivedStructures = (
     const alphaData = computeAlphaData(points, delaunay, alpha);
     return {
       voronoiCells,
-      graphEdges: alphaData.edges,
+      // alpha-shape: only boundary edges; alpha-complex: all edges
+      graphEdges: mode === "alpha-shape" ? alphaData.boundaryEdges : alphaData.allEdges,
       alphaTriangles: mode === "alpha-complex" ? alphaData.triangles : [],
     };
   }
@@ -535,6 +611,80 @@ const computeDerivedStructures = (
   };
 };
 
+// Calculate average color of pixels inside a polygon from ImageData
+const getAverageColorInPolygon = (
+  imageData: ImageData,
+  polygon: Array<[number, number]>,
+  canvasWidth: number,
+  canvasHeight: number,
+): { r: number; g: number; b: number } => {
+  if (polygon.length < 3) {
+    return { r: 128, g: 128, b: 128 };
+  }
+
+  // Get bounding box
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of polygon) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  
+  // Clamp to canvas bounds
+  minX = Math.max(0, Math.floor(minX));
+  minY = Math.max(0, Math.floor(minY));
+  maxX = Math.min(canvasWidth - 1, Math.ceil(maxX));
+  maxY = Math.min(canvasHeight - 1, Math.ceil(maxY));
+
+  // Scale factor from canvas to image
+  const scaleX = imageData.width / canvasWidth;
+  const scaleY = imageData.height / canvasHeight;
+
+  let totalR = 0, totalG = 0, totalB = 0, count = 0;
+
+  // Point-in-polygon test (ray casting)
+  const isInsidePolygon = (px: number, py: number): boolean => {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i][0], yi = polygon[i][1];
+      const xj = polygon[j][0], yj = polygon[j][1];
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  };
+
+  // Sample pixels inside polygon
+  const step = Math.max(1, Math.floor(Math.min(maxX - minX, maxY - minY) / 20));
+  for (let y = minY; y <= maxY; y += step) {
+    for (let x = minX; x <= maxX; x += step) {
+      if (isInsidePolygon(x, y)) {
+        const imgX = Math.floor(x * scaleX);
+        const imgY = Math.floor(y * scaleY);
+        if (imgX >= 0 && imgX < imageData.width && imgY >= 0 && imgY < imageData.height) {
+          const idx = (imgY * imageData.width + imgX) * 4;
+          totalR += imageData.data[idx];
+          totalG += imageData.data[idx + 1];
+          totalB += imageData.data[idx + 2];
+          count++;
+        }
+      }
+    }
+  }
+
+  if (count === 0) {
+    return { r: 128, g: 128, b: 128 };
+  }
+
+  return {
+    r: Math.round(totalR / count),
+    g: Math.round(totalG / count),
+    b: Math.round(totalB / count),
+  };
+};
+
 const drawScene = (
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -543,6 +693,9 @@ const drawScene = (
   timestamp: number,
   derived: DerivedStructures,
   mode: GraphMode,
+  ghostPoint: { x: number; y: number } | null,
+  alphaRadius: number,
+  backgroundImage: ImageData | null,
 ) => {
   ctx.clearRect(0, 0, width, height);
 
@@ -579,29 +732,46 @@ const drawScene = (
         return;
       }
 
+      const shrunkPolygon = shrinkPolygon(polygon, CELL_GAP);
       const point = points[index];
-      const hue = (index * 47 + (t * 40) % 360) % 360;
-      const lightness = 58 + Math.sin(t * 2 + index) * 8;
-      const accentHue = (hue + 28) % 360;
-      const gradient = ctx.createLinearGradient(
-        point.x,
-        point.y,
-        width - point.x,
-        height - point.y,
-      );
-      gradient.addColorStop(0, `hsla(${hue}, 82%, ${lightness + 6}%, 0.95)`);
-      gradient.addColorStop(0.5, `hsla(${accentHue}, 78%, ${lightness - 6}%, 0.85)`);
-      gradient.addColorStop(
-        1,
-        `hsla(${(hue + 300) % 360}, 70%, ${Math.max(lightness - 10, 32)}%, 0.78)`,
-      );
+      
+      // Use image colors if available, otherwise use animated gradient
+      if (backgroundImage) {
+        const avgColor = getAverageColorInPolygon(backgroundImage, polygon, width, height);
+        drawRoundedPolygon(ctx, shrunkPolygon, dynamicRoundness);
+        ctx.fillStyle = `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})`;
+        ctx.fill();
+        // Subtle border based on average color
+        const borderLightness = (avgColor.r + avgColor.g + avgColor.b) / 3;
+        ctx.strokeStyle = borderLightness > 128 
+          ? `rgba(0, 0, 0, 0.15)` 
+          : `rgba(255, 255, 255, 0.15)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      } else {
+        const hue = (index * 47 + (t * 40) % 360) % 360;
+        const lightness = 58 + Math.sin(t * 2 + index) * 8;
+        const accentHue = (hue + 28) % 360;
+        const gradient = ctx.createLinearGradient(
+          point.x,
+          point.y,
+          width - point.x,
+          height - point.y,
+        );
+        gradient.addColorStop(0, `hsla(${hue}, 82%, ${lightness + 6}%, 0.95)`);
+        gradient.addColorStop(0.5, `hsla(${accentHue}, 78%, ${lightness - 6}%, 0.85)`);
+        gradient.addColorStop(
+          1,
+          `hsla(${(hue + 300) % 360}, 70%, ${Math.max(lightness - 10, 32)}%, 0.78)`,
+        );
 
-      drawRoundedPolygon(ctx, polygon, dynamicRoundness);
-      ctx.fillStyle = gradient;
-      ctx.fill();
-      ctx.strokeStyle = `hsla(${hue}, 90%, 80%, 0.22)`;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+        drawRoundedPolygon(ctx, shrunkPolygon, dynamicRoundness);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+        ctx.strokeStyle = `hsla(${hue}, 90%, 80%, 0.22)`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
     });
   } else {
     ctx.save();
@@ -701,6 +871,42 @@ const drawScene = (
     ctx.fill();
   }
   ctx.restore();
+
+  // Draw ghost point with alpha circle (right-click placed)
+  if (ghostPoint !== null) {
+    const hue = (baseHue + t * 26) % 360;
+    
+    // Draw alpha radius circle
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ghostPoint.x, ghostPoint.y, alphaRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = `hsla(${hue}, 90%, 70%, 0.8)`;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 6]);
+    ctx.stroke();
+    
+    // Fill with very light color
+    ctx.fillStyle = `hsla(${hue}, 80%, 60%, 0.08)`;
+    ctx.fill();
+    ctx.restore();
+    
+    // Draw ghost point (black with white outline)
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(ghostPoint.x, ghostPoint.y, POINT_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Inner dot
+    ctx.beginPath();
+    ctx.arc(ghostPoint.x, ghostPoint.y, POINT_RADIUS * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+    ctx.fill();
+    ctx.restore();
+  }
 };
 
 const VoronoiCanvas = () => {
@@ -713,11 +919,13 @@ const VoronoiCanvas = () => {
     createInitialPoints(DEFAULT_WIDTH, DEFAULT_HEIGHT),
   );
   const [mode, setMode] = useState<GraphMode>("voronoi");
-  const [alphaValue, setAlphaValue] = useState<number>(ALPHA_DEFAULT);
+  const [alphaSlider, setAlphaSlider] = useState<number>(ALPHA_SLIDER_DEFAULT);
+  const [ghostPoint, setGhostPoint] = useState<{ x: number; y: number } | null>(null);
+  const [backgroundImage, setBackgroundImage] = useState<ImageData | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const isAlphaMode = mode === "alpha-shape" || mode === "alpha-complex";
-  const alphaScale = Math.max(120, Math.min(size.width, size.height));
-  const alphaRadius = alphaScale * alphaValue;
+  const alphaRadius = sliderToRadius(alphaSlider);
 
   const derived = useMemo(
     () => computeDerivedStructures(points, size.width, size.height, alphaRadius, mode),
@@ -727,9 +935,17 @@ const VoronoiCanvas = () => {
   const pointsRef = useRef(points);
   const modeRef = useRef(mode);
   const derivedRef = useRef(derived);
+  const alphaRadiusRef = useRef(alphaRadius);
+  const ghostPointRef = useRef(ghostPoint);
+  const backgroundImageRef = useRef(backgroundImage);
   const dragRef = useRef<{
     pointerId: number;
     index: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+  const ghostDragRef = useRef<{
+    pointerId: number;
     offsetX: number;
     offsetY: number;
   } | null>(null);
@@ -741,6 +957,18 @@ const VoronoiCanvas = () => {
   useEffect(() => {
     pointsRef.current = points;
   }, [points]);
+
+  useEffect(() => {
+    alphaRadiusRef.current = alphaRadius;
+  }, [alphaRadius]);
+
+  useEffect(() => {
+    ghostPointRef.current = ghostPoint;
+  }, [ghostPoint]);
+
+  useEffect(() => {
+    backgroundImageRef.current = backgroundImage;
+  }, [backgroundImage]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -851,6 +1079,9 @@ const VoronoiCanvas = () => {
           time,
           derivedRef.current,
           modeRef.current,
+          ghostPointRef.current,
+          alphaRadiusRef.current,
+          backgroundImageRef.current,
         );
       }
       animationRef.current = requestAnimationFrame(renderFrame);
@@ -866,6 +1097,9 @@ const VoronoiCanvas = () => {
       now,
       derivedRef.current,
       modeRef.current,
+      ghostPointRef.current,
+      alphaRadiusRef.current,
+      backgroundImageRef.current,
     );
     animationRef.current = requestAnimationFrame(renderFrame);
 
@@ -916,6 +1150,22 @@ const VoronoiCanvas = () => {
     };
 
     const handlePointerDown = (event: PointerEvent) => {
+      // Ignore right-click (handled by contextmenu)
+      if (event.button === 2) return;
+      
+      // If ghost drag is active, skip normal handling
+      if (ghostDragRef.current !== null) return;
+      
+      // Check if clicking on ghost point (handled by ghost handler)
+      const currentGhost = ghostPointRef.current;
+      if (currentGhost !== null) {
+        const { x, y } = getRelativePosition(event);
+        const distToGhost = Math.hypot(currentGhost.x - x, currentGhost.y - y);
+        if (distToGhost <= POINT_RADIUS * 2) {
+          return; // Let ghost handler deal with it
+        }
+      }
+      
       event.preventDefault();
       const { x, y } = getRelativePosition(event);
       const hitIndex = findPointByPosition(x, y);
@@ -977,41 +1227,192 @@ const VoronoiCanvas = () => {
       }
     };
 
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      
+      // Check if clicking on existing ghost point to remove it
+      const currentGhost = ghostPointRef.current;
+      if (currentGhost !== null) {
+        const distToGhost = Math.hypot(currentGhost.x - x, currentGhost.y - y);
+        if (distToGhost <= POINT_RADIUS * 2) {
+          // Remove ghost point
+          setGhostPoint(null);
+          return;
+        }
+      }
+      
+      // Create or move ghost point to click position
+      setGhostPoint({ x, y });
+    };
+
+    // Handle ghost point dragging
+    const handleGhostPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return; // Only left click for drag
+      
+      const currentGhost = ghostPointRef.current;
+      if (currentGhost === null) return;
+      
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      
+      const distToGhost = Math.hypot(currentGhost.x - x, currentGhost.y - y);
+      if (distToGhost <= POINT_RADIUS * 2) {
+        // Start dragging ghost
+        ghostDragRef.current = {
+          pointerId: event.pointerId,
+          offsetX: currentGhost.x - x,
+          offsetY: currentGhost.y - y,
+        };
+        canvas.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    const handleGhostPointerMove = (event: PointerEvent) => {
+      const ghostDrag = ghostDragRef.current;
+      if (!ghostDrag || ghostDrag.pointerId !== event.pointerId) return;
+      
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      
+      const newX = clamp(x + ghostDrag.offsetX, 0, rect.width);
+      const newY = clamp(y + ghostDrag.offsetY, 0, rect.height);
+      
+      setGhostPoint({ x: newX, y: newY });
+    };
+
+    const releaseGhostPointer = (event: PointerEvent) => {
+      const ghostDrag = ghostDragRef.current;
+      if (ghostDrag && ghostDrag.pointerId === event.pointerId) {
+        ghostDragRef.current = null;
+        if (canvas.hasPointerCapture(event.pointerId)) {
+          canvas.releasePointerCapture(event.pointerId);
+        }
+      }
+    };
+
+    canvas.addEventListener("pointerdown", handleGhostPointerDown, true);
+    canvas.addEventListener("pointermove", handleGhostPointerMove);
+    canvas.addEventListener("pointerup", releaseGhostPointer);
+    canvas.addEventListener("pointercancel", releaseGhostPointer);
     canvas.addEventListener("pointerdown", handlePointerDown);
     canvas.addEventListener("pointermove", handlePointerMove);
     canvas.addEventListener("pointerup", releasePointer);
     canvas.addEventListener("pointercancel", releasePointer);
     canvas.addEventListener("pointerleave", releasePointer);
+    canvas.addEventListener("contextmenu", handleContextMenu);
 
     return () => {
+      canvas.removeEventListener("pointerdown", handleGhostPointerDown, true);
+      canvas.removeEventListener("pointermove", handleGhostPointerMove);
+      canvas.removeEventListener("pointerup", releaseGhostPointer);
+      canvas.removeEventListener("pointercancel", releaseGhostPointer);
       canvas.removeEventListener("pointerdown", handlePointerDown);
       canvas.removeEventListener("pointermove", handlePointerMove);
       canvas.removeEventListener("pointerup", releasePointer);
       canvas.removeEventListener("pointercancel", releasePointer);
       canvas.removeEventListener("pointerleave", releasePointer);
+      canvas.removeEventListener("contextmenu", handleContextMenu);
     };
   }, [size.width, size.height]);
 
   const modeMeta = GRAPH_MODE_OPTIONS.find((option) => option.value === mode);
 
-  return (
-    <div
-      ref={containerRef}
-      className="relative flex h-full w-full min-h-[520px] flex-1 items-stretch justify-stretch"
-    >
-      <canvas
-        ref={canvasRef}
-        className="h-full w-full rounded-[36px] border border-white/10 bg-transparent shadow-[0_40px_120px_-60px_rgba(56,189,248,0.45)]"
-      />
-      <div className="pointer-events-none absolute inset-0 rounded-[36px] bg-gradient-to-br from-white/6 via-transparent to-white/3 opacity-40 mix-blend-screen" />
+  // Handle image upload
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-8">
-        <div className="flex flex-col gap-4 text-sm text-slate-100/85">
-          <div className="pointer-events-auto max-w-sm rounded-3xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-300/80">
+    const img = new Image();
+    img.onload = () => {
+      // Create a temporary canvas to get ImageData
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = img.width;
+      tempCanvas.height = img.height;
+      const tempCtx = tempCanvas.getContext("2d");
+      if (!tempCtx) return;
+
+      tempCtx.drawImage(img, 0, 0);
+      const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
+      setBackgroundImage(imageData);
+    };
+    img.src = URL.createObjectURL(file);
+  };
+
+  // Handle download
+  // Handle download - render clean version without points, gaps, or rounded corners
+  const handleDownload = () => {
+    const canvas = canvasRef.current;
+    if (!canvas || mode !== "voronoi") return;
+
+    // Create a temporary canvas for clean export
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = size.width;
+    exportCanvas.height = size.height;
+    const ctx = exportCanvas.getContext("2d");
+    if (!ctx) return;
+
+    // Draw solid background
+    ctx.fillStyle = "#04050a";
+    ctx.fillRect(0, 0, size.width, size.height);
+
+    // Draw Voronoi cells without gaps, rounded corners, or points
+    derived.voronoiCells.forEach((polygon, index) => {
+      if (!polygon.length) return;
+
+      // Draw polygon without shrinking (no gaps) and without rounding
+      ctx.beginPath();
+      ctx.moveTo(polygon[0][0], polygon[0][1]);
+      for (let i = 1; i < polygon.length; i++) {
+        ctx.lineTo(polygon[i][0], polygon[i][1]);
+      }
+      ctx.closePath();
+
+      if (backgroundImage) {
+        // Use average color from image
+        const avgColor = getAverageColorInPolygon(backgroundImage, polygon, size.width, size.height);
+        ctx.fillStyle = `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})`;
+      } else {
+        // Use static color (no animation)
+        const hue = (index * 47) % 360;
+        const lightness = 58;
+        ctx.fillStyle = `hsl(${hue}, 82%, ${lightness}%)`;
+      }
+      ctx.fill();
+    });
+
+    // Download
+    const link = document.createElement("a");
+    link.download = "voronoi-artwork.png";
+    link.href = exportCanvas.toDataURL("image/png");
+    link.click();
+  };
+
+  // Clear image
+  const handleClearImage = () => {
+    setBackgroundImage(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* Mode selector above the canvas */}
+      <div className="rounded-3xl border border-white/10 bg-slate-950/70 p-4 backdrop-blur">
+        <div className="flex flex-col gap-4">
+          <div>
+            <p className="mb-3 text-xs uppercase tracking-[0.3em] text-slate-300/80">
               Modes de visualisation
             </p>
-            <div className="mt-3 grid grid-cols-1 gap-2 text-sm">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
               {GRAPH_MODE_OPTIONS.map((option) => {
                 const isActive = option.value === mode;
                 return (
@@ -1019,7 +1420,7 @@ const VoronoiCanvas = () => {
                     key={option.value}
                     type="button"
                     onClick={() => setMode(option.value)}
-                    className={`rounded-2xl border px-4 py-3 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 ${
+                    className={`rounded-xl border px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 ${
                       isActive
                         ? "border-cyan-300/70 bg-cyan-300/15 text-white"
                         : "border-white/10 bg-white/5 text-white/80 hover:border-white/30 hover:bg-white/10"
@@ -1028,41 +1429,52 @@ const VoronoiCanvas = () => {
                     <span className="block text-sm font-semibold">
                       {option.label}
                     </span>
-                    <span className="mt-1 block text-xs text-white/70">
+                    <span className="mt-0.5 block text-[10px] text-white/60 leading-tight">
                       {option.description}
                     </span>
                   </button>
                 );
               })}
             </div>
-            {isAlphaMode ? (
-              <div className="mt-5 space-y-3">
-                <div className="flex items-center justify-between text-xs text-white/70">
-                  <span>Rayon α</span>
-                  <span className="font-medium text-white">
-                    ≈ {Math.round(alphaRadius)} px
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={ALPHA_RANGE.min}
-                  max={ALPHA_RANGE.max}
-                  step={0.01}
-                  value={alphaValue}
-                  onChange={(event) => setAlphaValue(Number(event.target.value))}
-                  className="w-full accent-cyan-300"
-                />
-              </div>
-            ) : null}
           </div>
+          {isAlphaMode ? (
+            <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+              <span className="text-xs text-white/70">Rayon α</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.005}
+                value={alphaSlider}
+                onChange={(event) => setAlphaSlider(Number(event.target.value))}
+                className="flex-1 accent-cyan-300"
+              />
+              <span className="min-w-[70px] text-right text-xs font-medium text-white">
+                {Math.round(alphaRadius)} px
+              </span>
+            </div>
+          ) : null}
+        </div>
+      </div>
 
-          <div className="pointer-events-none max-w-sm text-xs leading-relaxed text-slate-200/80">
-            Cliquez pour ajouter un point, maintenez et déplacez pour ajuster la géométrie.
-            Les graphes sont recomputés à 30&nbsp;fps pour une animation fluide.
-          </div>
+      {/* Canvas container */}
+      <div
+        ref={containerRef}
+        className="relative flex h-full w-full min-h-[520px] flex-1 items-stretch justify-stretch"
+      >
+        <canvas
+          ref={canvasRef}
+          onContextMenu={(e) => e.preventDefault()}
+          className="h-full w-full rounded-[36px] border border-white/10 bg-transparent shadow-[0_40px_120px_-60px_rgba(56,189,248,0.45)]"
+        />
+        <div className="pointer-events-none absolute inset-0 rounded-[36px] bg-gradient-to-br from-white/6 via-transparent to-white/3 opacity-40 mix-blend-screen" />
+
+        {/* Info overlays */}
+        <div className="pointer-events-none absolute left-6 top-6 max-w-xs text-xs leading-relaxed text-slate-200/70">
+          Cliquez pour ajouter un point, maintenez et déplacez pour ajuster la géométrie.
         </div>
 
-        <div className="pointer-events-none flex flex-col items-end gap-1 text-xs text-white/60">
+        <div className="pointer-events-none absolute bottom-6 right-6 flex flex-col items-end gap-1 text-xs text-white/60">
           <span>Mode : {modeMeta?.label ?? ""}</span>
           {isAlphaMode ? (
             <span>Rayon α ≈ {Math.round(alphaRadius)} px</span>
@@ -1075,9 +1487,58 @@ const VoronoiCanvas = () => {
           ) : (
             <span>Arêtes : {derived.graphEdges.length}</span>
           )}
-          <span>Animation : 30 fps ciblés</span>
+          <span>Animation : 30 fps</span>
+          {backgroundImage ? (
+            <span className="text-cyan-300/80">Image chargée</span>
+          ) : null}
         </div>
       </div>
+
+      {/* Image controls */}
+      {mode === "voronoi" && (
+        <div className="rounded-3xl border border-white/10 bg-slate-950/70 p-4 backdrop-blur">
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageUpload}
+              className="hidden"
+              id="image-upload"
+            />
+            <label
+              htmlFor="image-upload"
+              className="cursor-pointer rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/80 transition hover:border-white/30 hover:bg-white/10"
+            >
+              Charger une image
+            </label>
+            
+            {backgroundImage && (
+              <button
+                type="button"
+                onClick={handleClearImage}
+                className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300 transition hover:border-red-500/50 hover:bg-red-500/20"
+              >
+                Supprimer l&apos;image
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-4 py-2 text-sm text-cyan-300 transition hover:border-cyan-300/50 hover:bg-cyan-300/20"
+            >
+              Télécharger
+            </button>
+
+            <span className="ml-auto text-xs text-white/50">
+              {backgroundImage 
+                ? "Les couleurs des cellules sont calculées depuis l'image" 
+                : "Chargez une image pour colorier les cellules Voronoï"}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

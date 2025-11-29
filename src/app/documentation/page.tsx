@@ -46,9 +46,10 @@ const DOCUMENTATION_SECTIONS = [
     id: "technical",
     title: "Documentation Technique",
     sections: [
-      { id: "technologies", label: "Technologies utilisées" },
-      { id: "alpha-shape-algorithm", label: "Algorithme Alpha-Shape" },
-      { id: "alpha-complex-algorithm", label: "Algorithme Alpha-Complex" },
+  { id: "technologies", label: "Technologies utilisées" },
+  { id: "alpha-shape-algorithm", label: "Algorithme Alpha-Shape" },
+  { id: "alpha-complex-algorithm", label: "Algorithme Alpha-Complex" },
+  { id: "brute-force-voronoi", label: "Voronoï Brute-Force (Discret)" },
       { id: "visual-effects", label: "Effets visuels" },
       { id: "performance", label: "Optimisations et Performance" },
       { id: "interactive-features", label: "Interactions utilisateur" },
@@ -181,6 +182,77 @@ export default function Documentation() {
 
             {/* Content Sections */}
             <div className="space-y-6 text-white/80">
+              {activeSection === "brute-force-voronoi" && (
+                <section className="space-y-8">
+                  <div>
+                    <h2 className="mb-4 text-3xl font-bold text-white">Voronoï Brute-Force (Discret)</h2>
+                    <p className="mb-4 text-white/70 leading-relaxed">
+                      Ce mode calcule le diagramme de Voronoï de façon <strong className="text-white">discrète</strong> (pixel par pixel), sans utiliser d'algorithme géométrique avancé ni de structure continue. Chaque pixel du canvas est affecté au point le plus proche par une recherche exhaustive.
+                    </p>
+                  </div>
+
+                  <div>
+                    <h3 className="mb-3 text-xl font-semibold text-white">Principe de l'algorithme</h3>
+                    <ol className="space-y-2 text-white/70 ml-4 mb-4">
+                      <li className="flex gap-2">
+                        <span>1.</span>
+                        <span>Pour chaque pixel du canvas (x, y), calculer la distance à tous les points.</span>
+                      </li>
+                      <li className="flex gap-2">
+                        <span>2.</span>
+                        <span>Attribuer le pixel au point ayant la distance minimale.</span>
+                      </li>
+                      <li className="flex gap-2">
+                        <span>3.</span>
+                        <span>Colorier le pixel selon la couleur de la cellule correspondante (palette ou image).</span>
+                      </li>
+                    </ol>
+                    <p className="text-white/70 text-sm mt-2">
+                      <strong>Complexité :</strong> O(W × H × N) où W et H sont la largeur/hauteur du canvas et N le nombre de points.<br/>
+                      <strong>Remarque :</strong> Ce mode est très coûteux pour de grandes résolutions ou un grand nombre de points.
+                    </p>
+                  </div>
+
+                  <div>
+                    <h3 className="mb-3 text-xl font-semibold text-white">Palette de couleurs</h3>
+                    <ul className="space-y-2 text-white/70 ml-4">
+                      <li className="flex gap-2">
+                        <span>•</span>
+                        <span>Palette <strong className="text-white">grise bien répartie</strong> : chaque cellule reçoit une teinte de gris distincte, générée pour maximiser le contraste entre cellules.</span>
+                      </li>
+                      <li className="flex gap-2">
+                        <span>•</span>
+                        <span>Coloration par <strong className="text-white">image</strong> : si une image est chargée, la couleur de chaque cellule est la moyenne des pixels de l'image correspondant à la cellule.</span>
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div>
+                    <h3 className="mb-3 text-xl font-semibold text-white">Extrait de code simplifié</h3>
+                    <div className="rounded-lg border border-cyan-300/20 bg-cyan-300/5 p-4 mb-4">
+                      <pre className="text-xs text-white/60 overflow-x-auto whitespace-pre-wrap break-words">
+{`for (let y = 0; y < height; y++) {
+  for (let x = 0; x < width; x++) {
+    let minDist = Infinity;
+    let minIdx = -1;
+    for (let i = 0; i < points.length; i++) {
+      const dx = x - points[i].x;
+      const dy = y - points[i].y;
+      const dist = dx * dx + dy * dy;
+      if (dist < minDist) {
+        minDist = dist;
+        minIdx = i;
+      }
+    }
+    // Affecter la couleur du pixel selon minIdx
+    // ...
+  }
+}`}
+                      </pre>
+                    </div>
+                  </div>
+                </section>
+              )}
               {activeSection === "introduction" && (
                 <section className="space-y-6">
                   <p className="text-lg leading-relaxed text-white/80">
@@ -197,6 +269,15 @@ export default function Documentation() {
                         <span className="text-cyan-300">•</span>
                         <span>
                           <strong className="text-white">Créer des diagrammes de Voronoï</strong> en ajoutant et en déplaçant des points
+                        </span>
+                      </li>
+                      <li className="flex gap-3">
+                        <span className="text-cyan-300">•</span>
+                        <span>
+                          <SectionLink sectionId="brute-force-voronoi">
+                            <strong className="text-white">Mode Voronoï brute-force (discret)</strong>
+                          </SectionLink>
+                          : calcul pixel par pixel pour une visualisation fidèle et export sans artefacts
                         </span>
                       </li>
                       <li className="flex gap-3">

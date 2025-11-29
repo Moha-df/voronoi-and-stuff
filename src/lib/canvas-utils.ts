@@ -217,8 +217,8 @@ export const drawScene = (
   const baseHue = MODE_BASE_HUE[mode];
 
   // Mode-specific rendering
-  if (mode === "voronoi") {
-    drawVoronoiCells(ctx, derived, points, t, width, height, backgroundImage);
+  if (mode === "voronoi" || mode === "voronoi-bruteforce") {
+    drawVoronoiCells(ctx, derived, points, t, width, height, backgroundImage, mode);
   } else {
     drawBackgroundCells(ctx, derived, mode, t, baseHue, dynamicRoundness);
     if (mode === "alpha-complex" && derived.alphaTriangles.length) {
@@ -240,6 +240,7 @@ export const drawScene = (
 
 /**
  * Renders Voronoi cells with gradients and image-based coloring
+ * Supports both continuous and discrete (brute force) Voronoi diagrams
  * @param ctx - 2D canvas context
  * @param derived - Geometric structures
  * @param points - Array of points
@@ -247,6 +248,7 @@ export const drawScene = (
  * @param width - Canvas width
  * @param height - Canvas height
  * @param backgroundImage - Optional background image
+ * @param mode - Visualization mode
  */
 const drawVoronoiCells = (
   ctx: CanvasRenderingContext2D,
@@ -255,71 +257,189 @@ const drawVoronoiCells = (
   t: number,
   width: number,
   height: number,
-  backgroundImage: ImageData | null
+  backgroundImage: ImageData | null,
+  mode: GraphMode
 ): void => {
-  derived.voronoiCells.forEach((polygon, index) => {
-    if (!polygon.length) {
-      return;
-    }
+  // For brute force mode, render all cells using a temporary canvas
+  // We use drawImage instead of putImageData because putImageData ignores canvas transforms (DPR)
+  if (mode === "voronoi-bruteforce") {
+    // Create a temporary canvas at logical size
+    const tempCanvas = document.createElement("canvas");
+    tempCanvas.width = width;
+    tempCanvas.height = height;
+    const tempCtx = tempCanvas.getContext("2d");
+    if (!tempCtx) return;
 
-    const shrunkPolygon = shrinkPolygon(polygon, CELL_GAP);
-    const point = points[index];
+    const imageData = tempCtx.createImageData(width, height);
+    const data = imageData.data;
 
+    // Pre-calculate RGB colors for each cell
+    const cellColors: Array<{ r: number; g: number; b: number }> = [];
+    
     if (backgroundImage) {
-      // Use colors sampled from image
-      drawRoundedPolygon(ctx, shrunkPolygon, CELL_ROUNDING);
-      const avgColor = getAverageColorInPolygon(
-        backgroundImage,
-        polygon,
-        width,
-        height
-      );
-      ctx.fillStyle = `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})`;
-      ctx.fill();
+      // Calculate average color for each cell from background image
+      // First, we need to accumulate colors per cell
+      const cellColorSums: Array<{ r: number; g: number; b: number; count: number }> = 
+        points.map(() => ({ r: 0, g: 0, b: 0, count: 0 }));
+      
+      // Scale factors for sampling the background image
+      const scaleX = backgroundImage.width / width;
+      const scaleY = backgroundImage.height / height;
+      
+      // First pass: accumulate colors for each cell
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let closestIndex = 0;
+          let closestDistance = Number.MAX_VALUE;
 
-      // Adaptive border based on image brightness
-      const borderLightness = (avgColor.r + avgColor.g + avgColor.b) / 3;
-      ctx.strokeStyle =
-        borderLightness > 128
-          ? `rgba(0, 0, 0, 0.15)`
-          : `rgba(255, 255, 255, 0.15)`;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+          for (let i = 0; i < points.length; i++) {
+            const seedX = Math.round(points[i].x);
+            const seedY = Math.round(points[i].y);
+            const dx = x - seedX;
+            const dy = y - seedY;
+            const distSquared = dx * dx + dy * dy;
+
+            if (distSquared < closestDistance) {
+              closestDistance = distSquared;
+              closestIndex = i;
+            }
+          }
+
+          // Sample color from background image
+          const imgX = Math.floor(x * scaleX);
+          const imgY = Math.floor(y * scaleY);
+          const imgIndex = (imgY * backgroundImage.width + imgX) * 4;
+          
+          cellColorSums[closestIndex].r += backgroundImage.data[imgIndex];
+          cellColorSums[closestIndex].g += backgroundImage.data[imgIndex + 1];
+          cellColorSums[closestIndex].b += backgroundImage.data[imgIndex + 2];
+          cellColorSums[closestIndex].count++;
+        }
+      }
+      
+      // Calculate average colors
+      for (let i = 0; i < points.length; i++) {
+        const sum = cellColorSums[i];
+        if (sum.count > 0) {
+          cellColors.push({
+            r: Math.round(sum.r / sum.count),
+            g: Math.round(sum.g / sum.count),
+            b: Math.round(sum.b / sum.count),
+          });
+        } else {
+          cellColors.push({ r: 128, g: 128, b: 128 });
+        }
+      }
     } else {
-      // Animated gradient cells
-      const hue = (index * 47 + (t * 40) % 360) % 360;
-      const lightness = 58 + Math.sin(t * 2 + index) * 8;
-      const accentHue = (hue + 28) % 360;
-      const gradient = ctx.createLinearGradient(
-        point.x,
-        point.y,
-        width - point.x,
-        height - point.y
-      );
-      gradient.addColorStop(
-        0,
-        `hsla(${hue}, 82%, ${lightness + 6}%, 0.95)`
-      );
-      gradient.addColorStop(
-        0.5,
-        `hsla(${accentHue}, 78%, ${lightness - 6}%, 0.85)`
-      );
-      gradient.addColorStop(
-        1,
-        `hsla(${(hue + 300) % 360}, 70%, ${Math.max(
-          lightness - 10,
-          32
-        )}%, 0.78)`
-      );
-
-      drawRoundedPolygon(ctx, shrunkPolygon, CELL_ROUNDING);
-      ctx.fillStyle = gradient;
-      ctx.fill();
-      ctx.strokeStyle = `hsla(${hue}, 90%, 80%, 0.22)`;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      // Palette de gris bien répartie (chaque cellule a une teinte unique)
+      const n = points.length;
+      for (let i = 0; i < n; i++) {
+        // Répartition linéaire sur la plage 60-180
+        const gray = Math.round(60 + (i * (180 - 60)) / Math.max(1, n - 1));
+        cellColors.push({ r: gray, g: gray, b: gray });
+      }
     }
-  });
+
+    // Render each pixel to its closest seed
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let closestIndex = 0;
+        let closestDistance = Number.MAX_VALUE;
+
+        // Find closest seed using discrete coordinates
+        // Round point coordinates to nearest integer for truly discrete calculation
+        for (let i = 0; i < points.length; i++) {
+          const seedX = Math.round(points[i].x);
+          const seedY = Math.round(points[i].y);
+          const dx = x - seedX;
+          const dy = y - seedY;
+          const distSquared = dx * dx + dy * dy;
+
+          if (distSquared < closestDistance) {
+            closestDistance = distSquared;
+            closestIndex = i;
+          }
+        }
+
+        // Fill pixel with cell color
+        const color = cellColors[closestIndex];
+        const pixelIndex = (y * width + x) * 4;
+        data[pixelIndex] = color.r;
+        data[pixelIndex + 1] = color.g;
+        data[pixelIndex + 2] = color.b;
+        data[pixelIndex + 3] = 255;
+      }
+    }
+
+    // Put image data on temp canvas, then draw to main canvas (respects transforms)
+    tempCtx.putImageData(imageData, 0, 0);
+    ctx.drawImage(tempCanvas, 0, 0);
+  } else {
+    // Continuous Voronoi rendering with rounded corners
+    derived.voronoiCells.forEach((polygon, index) => {
+      if (!polygon.length) {
+        return;
+      }
+
+      const shrunkPolygon = shrinkPolygon(polygon, CELL_GAP);
+      const point = points[index];
+
+      if (backgroundImage) {
+        // Use colors sampled from image
+        drawRoundedPolygon(ctx, shrunkPolygon, CELL_ROUNDING);
+        const avgColor = getAverageColorInPolygon(
+          backgroundImage,
+          polygon,
+          width,
+          height
+        );
+        ctx.fillStyle = `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})`;
+        ctx.fill();
+
+        // Adaptive border based on image brightness
+        const borderLightness = (avgColor.r + avgColor.g + avgColor.b) / 3;
+        ctx.strokeStyle =
+          borderLightness > 128
+            ? `rgba(0, 0, 0, 0.15)`
+            : `rgba(255, 255, 255, 0.15)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      } else {
+        // Animated gradient cells
+        const hue = (index * 47 + (t * 40) % 360) % 360;
+        const lightness = 58 + Math.sin(t * 2 + index) * 8;
+        const accentHue = (hue + 28) % 360;
+        const gradient = ctx.createLinearGradient(
+          point.x,
+          point.y,
+          width - point.x,
+          height - point.y
+        );
+        gradient.addColorStop(
+          0,
+          `hsla(${hue}, 82%, ${lightness + 6}%, 0.95)`
+        );
+        gradient.addColorStop(
+          0.5,
+          `hsla(${accentHue}, 78%, ${lightness - 6}%, 0.85)`
+        );
+        gradient.addColorStop(
+          1,
+          `hsla(${(hue + 300) % 360}, 70%, ${Math.max(
+            lightness - 10,
+            32
+          )}%, 0.78)`
+        );
+
+        drawRoundedPolygon(ctx, shrunkPolygon, CELL_ROUNDING);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+        ctx.strokeStyle = `hsla(${hue}, 90%, 80%, 0.22)`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    });
+  }
 };
 
 /**
@@ -467,12 +587,15 @@ const drawPoints = (
   ctx.globalCompositeOperation = "lighter";
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index];
+    // In brute force mode, use discrete (rounded) coordinates for consistency
+    const drawX = mode === "voronoi-bruteforce" ? Math.round(point.x) : point.x;
+    const drawY = mode === "voronoi-bruteforce" ? Math.round(point.y) : point.y;
     const hue = (baseHue + index * 17 + t * 26) % 360;
     ctx.beginPath();
     ctx.fillStyle = `hsla(${hue}, 95%, 92%, 0.92)`;
     ctx.shadowColor = `hsla(${hue}, 95%, 65%, 0.7)`;
     ctx.shadowBlur = 25;
-    ctx.arc(point.x, point.y, POINT_RADIUS, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, POINT_RADIUS, 0, Math.PI * 2);
     ctx.fill();
     ctx.lineWidth = 2.2;
     ctx.strokeStyle = "rgba(255,255,255,0.55)";
@@ -482,7 +605,7 @@ const drawPoints = (
     ctx.beginPath();
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.shadowBlur = 0;
-    ctx.arc(point.x, point.y, POINT_RADIUS * 0.4, 0, Math.PI * 2);
+    ctx.arc(drawX, drawY, POINT_RADIUS * 0.4, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();

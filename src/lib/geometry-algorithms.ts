@@ -418,6 +418,48 @@ export const computeMinimumSpanningTreeEdges = (points: Point[]): EdgeIndex[] =>
 };
 
 /**
+ * Computes discrete Voronoi diagram using brute force algorithm
+ * For each pixel, finds the closest seed point
+ * @param points - Point set (seeds)
+ * @param width - Canvas width
+ * @param height - Canvas height
+ * @returns Voronoi cells represented as pixel groups
+ */
+const computeVoronoiBruteForce = (
+  points: Point[],
+  width: number,
+  height: number
+): Array<Array<[number, number]>> => {
+  // Initialize cells for each point
+  const cells: Array<Array<[number, number]>> = points.map(() => []);
+
+  // For each pixel in the canvas
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let closestIndex = 0;
+      let closestDistance = Number.MAX_VALUE;
+
+      // Find the closest seed point (brute force)
+      for (let i = 0; i < points.length; i++) {
+        const dx = x - points[i].x;
+        const dy = y - points[i].y;
+        const distSquared = dx * dx + dy * dy;
+
+        if (distSquared < closestDistance) {
+          closestDistance = distSquared;
+          closestIndex = i;
+        }
+      }
+
+      // Add pixel to the closest seed's cell
+      cells[closestIndex].push([x, y]);
+    }
+  }
+
+  return cells;
+};
+
+/**
  * Computes all geometric structures needed for rendering based on visualization mode
  * This is the main entry point for computing derived data
  * @param points - Point set
@@ -437,6 +479,16 @@ export const computeDerivedStructures = (
   if (points.length === 0) {
     return {
       voronoiCells: [],
+      graphEdges: [],
+      alphaTriangles: [],
+    };
+  }
+
+  // Brute force Voronoi mode (discrete)
+  if (mode === "voronoi-bruteforce") {
+    const cells = computeVoronoiBruteForce(points, width, height);
+    return {
+      voronoiCells: cells,
       graphEdges: [],
       alphaTriangles: [],
     };

@@ -16,6 +16,11 @@ export const GRAPH_MODE_OPTIONS: GraphModeOption[] = [
     description: "Cellules colorées et animées",
   },
   {
+    value: "voronoi-bruteforce",
+    label: "Voronoï BF",
+    description: "Diagramme discret par force brute",
+  },
+  {
     value: "alpha-shape",
     label: "Alpha-shape",
     description: "Arêtes filtrées par rayon α",
@@ -57,6 +62,7 @@ export const GRAPH_MODE_OPTIONS: GraphModeOption[] = [
  */
 export const MODE_BASE_HUE: Record<GraphMode, number> = {
   voronoi: 215,
+  "voronoi-bruteforce": 215,
   "alpha-shape": 195,
   "alpha-complex": 275,
   "nn-crust": 345,

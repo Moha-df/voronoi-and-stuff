@@ -25,6 +25,7 @@ export type TriangleIndex = [number, number, number];
 /**
  * Available visualization modes for the 2D graph toolkit
  * - voronoi: Animated Voronoi diagram with colored cells
+ * - voronoi-bruteforce: Discrete Voronoi diagram using brute force algorithm
  * - alpha-shape: Alpha shape with boundary edges only
  * - alpha-complex: Full alpha complex with all triangles
  * - nn-crust: Nearest neighbor crust edges
@@ -34,6 +35,7 @@ export type TriangleIndex = [number, number, number];
  */
 export type GraphMode =
   | "voronoi"
+  | "voronoi-bruteforce"
   | "alpha-shape"
   | "alpha-complex"
   | "nn-crust"

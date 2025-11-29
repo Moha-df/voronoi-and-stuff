@@ -84,6 +84,34 @@ export const VoronoiCanvas = () => {
   );
   const [backgroundImage, setBackgroundImage] = useState<ImageData | null>(null);
 
+  // ==========================================================================
+  // State for Random Seed Control
+  // ==========================================================================
+  const [seedCount, setSeedCount] = useState<number>(10); // Default number of seeds
+
+  // ==========================================================================
+  // Effect: Adjust Points Based on Seed Count
+  // ==========================================================================
+  useEffect(() => {
+    setPoints((prevPoints) => {
+      const currentCount = prevPoints.length;
+      if (currentCount === seedCount) return prevPoints; // No change needed
+
+      if (currentCount < seedCount) {
+        // Add random points
+        const newPoints = Array.from({ length: seedCount - currentCount }, () => ({
+          id: idCounterRef.current++,
+          x: Math.random() * size.width,
+          y: Math.random() * size.height,
+        }));
+        return [...prevPoints, ...newPoints];
+      } else {
+        // Remove excess points
+        return prevPoints.slice(0, seedCount);
+      }
+    });
+  }, [seedCount, size.width, size.height]);
+
   // ============================================================================
   // Derived State
   // ============================================================================
@@ -543,7 +571,7 @@ export const VoronoiCanvas = () => {
   // ============================================================================
   const handleDownload = () => {
     const canvas = canvasRef.current;
-    if (!canvas || mode !== "voronoi") return;
+    if (!canvas || (mode !== "voronoi" && mode !== "voronoi-bruteforce")) return;
 
     const exportCanvas = document.createElement("canvas");
     exportCanvas.width = size.width;
@@ -554,31 +582,147 @@ export const VoronoiCanvas = () => {
     ctx.fillStyle = "#04050a";
     ctx.fillRect(0, 0, size.width, size.height);
 
-    derived.voronoiCells.forEach((polygon, index) => {
-      if (!polygon.length) return;
+    // Brute force mode: render pixel by pixel
+    if (mode === "voronoi-bruteforce") {
+      const imageData = ctx.createImageData(size.width, size.height);
+      const data = imageData.data;
 
-      ctx.beginPath();
-      ctx.moveTo(polygon[0][0], polygon[0][1]);
-      for (let i = 1; i < polygon.length; i++) {
-        ctx.lineTo(polygon[i][0], polygon[i][1]);
-      }
-      ctx.closePath();
-
+      // Pre-calculate colors for each cell
+      const cellColors: Array<{ r: number; g: number; b: number }> = [];
+      
       if (backgroundImage) {
-        const avgColor = getAverageColorInPolygon(
-          backgroundImage,
-          polygon,
-          size.width,
-          size.height
-        );
-        ctx.fillStyle = `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})`;
+        // Calculate average color for each cell from background image
+        const cellColorSums: Array<{ r: number; g: number; b: number; count: number }> = 
+          points.map(() => ({ r: 0, g: 0, b: 0, count: 0 }));
+        
+        const scaleX = backgroundImage.width / size.width;
+        const scaleY = backgroundImage.height / size.height;
+        
+        for (let y = 0; y < size.height; y++) {
+          for (let x = 0; x < size.width; x++) {
+            let closestIndex = 0;
+            let closestDistance = Number.MAX_VALUE;
+
+            for (let i = 0; i < points.length; i++) {
+              const seedX = Math.round(points[i].x);
+              const seedY = Math.round(points[i].y);
+              const dx = x - seedX;
+              const dy = y - seedY;
+              const distSquared = dx * dx + dy * dy;
+
+              if (distSquared < closestDistance) {
+                closestDistance = distSquared;
+                closestIndex = i;
+              }
+            }
+
+            const imgX = Math.floor(x * scaleX);
+            const imgY = Math.floor(y * scaleY);
+            const imgIndex = (imgY * backgroundImage.width + imgX) * 4;
+            
+            cellColorSums[closestIndex].r += backgroundImage.data[imgIndex];
+            cellColorSums[closestIndex].g += backgroundImage.data[imgIndex + 1];
+            cellColorSums[closestIndex].b += backgroundImage.data[imgIndex + 2];
+            cellColorSums[closestIndex].count++;
+          }
+        }
+        
+        for (let i = 0; i < points.length; i++) {
+          const sum = cellColorSums[i];
+          if (sum.count > 0) {
+            cellColors.push({
+              r: Math.round(sum.r / sum.count),
+              g: Math.round(sum.g / sum.count),
+              b: Math.round(sum.b / sum.count),
+            });
+          } else {
+            cellColors.push({ r: 128, g: 128, b: 128 });
+          }
+        }
       } else {
-        const hue = (index * 47) % 360;
-        const lightness = 58;
-        ctx.fillStyle = `hsl(${hue}, 82%, ${lightness}%)`;
+        for (let i = 0; i < points.length; i++) {
+          const hue = (i * 137.5) % 360;
+          const saturation = 85;
+          const lightness = 55;
+
+          const h = hue / 60;
+          const c = ((100 - Math.abs(2 * lightness - 100)) * saturation) / 100;
+          const xc = c * (1 - Math.abs((h % 2) - 1));
+          let r = 0, g = 0, b = 0;
+
+          if (h < 1) [r, g, b] = [c, xc, 0];
+          else if (h < 2) [r, g, b] = [xc, c, 0];
+          else if (h < 3) [r, g, b] = [0, c, xc];
+          else if (h < 4) [r, g, b] = [0, xc, c];
+          else if (h < 5) [r, g, b] = [xc, 0, c];
+          else [r, g, b] = [c, 0, xc];
+
+          const m = (lightness / 100) - c / 2;
+          cellColors.push({
+            r: Math.round((r + m) * 255),
+            g: Math.round((g + m) * 255),
+            b: Math.round((b + m) * 255),
+          });
+        }
       }
-      ctx.fill();
-    });
+
+      // Render each pixel
+      for (let y = 0; y < size.height; y++) {
+        for (let x = 0; x < size.width; x++) {
+          let closestIndex = 0;
+          let closestDistance = Number.MAX_VALUE;
+
+          for (let i = 0; i < points.length; i++) {
+            const seedX = Math.round(points[i].x);
+            const seedY = Math.round(points[i].y);
+            const dx = x - seedX;
+            const dy = y - seedY;
+            const distSquared = dx * dx + dy * dy;
+
+            if (distSquared < closestDistance) {
+              closestDistance = distSquared;
+              closestIndex = i;
+            }
+          }
+
+          const color = cellColors[closestIndex];
+          const pixelIndex = (y * size.width + x) * 4;
+          data[pixelIndex] = color.r;
+          data[pixelIndex + 1] = color.g;
+          data[pixelIndex + 2] = color.b;
+          data[pixelIndex + 3] = 255;
+        }
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+    } else {
+      // Continuous Voronoi mode: render polygons
+      derived.voronoiCells.forEach((polygon, index) => {
+        if (!polygon.length) return;
+
+        ctx.beginPath();
+        ctx.moveTo(polygon[0][0], polygon[0][1]);
+        for (let i = 1; i < polygon.length; i++) {
+          ctx.lineTo(polygon[i][0], polygon[i][1]);
+        }
+        ctx.closePath();
+
+        if (backgroundImage) {
+          const avgColor = getAverageColorInPolygon(
+            backgroundImage,
+            polygon,
+            size.width,
+            size.height
+          );
+          ctx.fillStyle = `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})`;
+        } else {
+          const hue = (index * 47) % 360;
+          const lightness = 58;
+          ctx.fillStyle = `hsl(${hue}, 82%, ${lightness}%)`;
+        }
+        ctx.fill();
+      });
+    }
 
     const link = document.createElement("a");
     link.download = "voronoi-artwork.png";
@@ -600,7 +744,7 @@ export const VoronoiCanvas = () => {
             <p className="mb-3 text-xs uppercase tracking-[0.3em] text-slate-300/80">
               Modes de visualisation
             </p>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+            <div className="grid grid-cols-2 gap-1 sm:grid-cols-4 lg:grid-cols-8">
               {GRAPH_MODE_OPTIONS.map((option) => {
                 const isActive = option.value === mode;
                 const isDisabled = option.disabled === true;
@@ -610,7 +754,7 @@ export const VoronoiCanvas = () => {
                     type="button"
                     disabled={isDisabled}
                     onClick={() => !isDisabled && setMode(option.value)}
-                    className={`rounded-xl border px-3 py-2 text-left transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 ${
+                    className={`rounded-lg border px-2 py-1.5 text-left text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/80 ${
                       isDisabled
                         ? "cursor-not-allowed border-white/5 bg-white/[0.02] text-white/30"
                         : isActive
@@ -685,7 +829,7 @@ export const VoronoiCanvas = () => {
             <span>Rayon α ≈ {Math.round(alphaRadius)} px</span>
           ) : null}
           <span>Points : {points.length}</span>
-          {mode === "voronoi" ? (
+          {mode === "voronoi" || mode === "voronoi-bruteforce" ? (
             <span>Cellules : {derived.voronoiCells.length}</span>
           ) : mode === "alpha-complex" ? (
             <span>Triangles : {derived.alphaTriangles.length}</span>
@@ -699,8 +843,25 @@ export const VoronoiCanvas = () => {
         </div>
       </div>
 
+      {/* Random Seed Slider */}
+      <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+        <span className="text-xs text-white/70">Nombre de germes</span>
+        <input
+          type="range"
+          min={1}
+          max={100}
+          step={1}
+          value={seedCount}
+          onChange={(event) => setSeedCount(Number(event.target.value))}
+          className="flex-1 accent-cyan-300"
+        />
+        <span className="min-w-[70px] text-right text-xs font-medium text-white">
+          {seedCount}
+        </span>
+      </div>
+
       {/* Image Controls */}
-      {mode === "voronoi" && (
+      {(mode === "voronoi" || mode === "voronoi-bruteforce") && (
         <div className="rounded-3xl border border-white/10 bg-slate-950/70 p-4 backdrop-blur">
           <div className="flex flex-wrap items-center gap-3">
             <input
